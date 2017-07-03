@@ -101,3 +101,7 @@ ENV/
 .mypy_cache/
 
 data_set/
+
+#hdf5
+*.h5
+*.hdf5
