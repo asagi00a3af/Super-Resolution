@@ -3,52 +3,74 @@
 動画データは事前に非圧縮の画像データに連番で切り分ける,
 画像データの形式はtiffとする
 '''
+from os import path
+import glob
 import numpy as np
 import h5py
 import cv2
-from os import path
-import glob
+from tqdm import tqdm
 
 #データセットパラメータ
-#三次元データ (Nf, H, W)
-W = 36
-H = 36
+#三次元データ (Nf, H, W) これ1つをsequenceと呼ぶ
+#拡縮のスケールファクター3
+W = 41
+H = 41
 Nf = 5
-#パス情報
-images_path = '/media/shimo/HDD_storage/DataSet/SCENE_1/2K_images/*.tiff'
-#画像連番リスト
-image_names = sorted(glob.glob(images_path))
-#ソース画像のサイズ取得
-src_h, src_w, ch = cv2.imread(image_names[0]).shape
-del ch
-#全テー多数
-num_data = (src_h // H) * (src_w // W) * (len(image_names) // Nf)
+Scl = 3
 
-#hdf5関連設定
-idx = 0
-f = h5py.File('test.hdf5','w')
-f.create_dataset('dat', (num_data, H, W, Nf), chunks=True, dtype=np.float32)
-f.create_dataset('lab', (num_data, H, W),chunks=True, dtype=np.float32)
+if __name__ == '__main__':
+    #パス情報
+    images_path = '/media/shimo/HDD_storage/DataSet/SCENE_1/2K_images/*.tiff'
+    hdf5_path = '/media/shimo/HDD_storage/DataSet/SCENE_1/SCENE1_2K.hdf5'
+    #画像連番リスト
+    image_names = sorted(glob.glob(images_path))
+    #ソース動画のサイズ取得
+    h_src, w_src, ch = cv2.imread(image_names[0]).shape
+    del ch
+    #ソース動画の画像枚数
+    num_src = len(image_names)
+    #画像の縦横の分割数
+    h_sep, w_sep = h_src // H, w_src // W
+    #フレームの分割数
+    f_sep = num_src // Nf
+    #最終的なデータ数(ピクセル分散を考慮しない場合)
+    num_data = f_sep * h_sep * w_sep
+    #データに関する情報出力
+    print('source moive(or images):')
+    print('width:{}\theight:{}\tframe:{}'.format(w_src, h_src, num_src))
+    print('dataset parameter:')
+    print('width:{}\theight:{}\tframe:{} \tnum:{} \t scale:{}'.format(W, H, Nf, num_data,Scl))
 
-for seq in range(len(image_names) // Nf):
-    '''
-    seq: sequence
-    画像連番リストをフレーム数で分割し,
-    そのフレーム数のデータセットごと画像を切り出す
-    '''
-    print(seq, "/", len(image_names) // Nf)
-    image_data = np.zeros((src_h, src_w, Nf))
-    #Nf枚の画像読み込み
-    for i, name in enumerate(image_names[seq * Nf : (seq + 1) * Nf]):
-        image_data[:,:,i] = cv2.cvtColor(cv2.imread(name), cv2.COLOR_BGR2YCR_CB)[:,:,0]
-    #読み込んだ画像をラベルとデータセットの形状に変換
-    image_label = image_data[:,:,Nf//2+1].astype(np.float32) / 255
-    image_buf = cv2.resize(image_data, (src_w//3, src_h//3), interpolation=cv2.INTER_CUBIC)
-    image_data = cv2.resize(image_buf, (src_w, src_h), interpolation=cv2.INTER_CUBIC).astype(np.float32) / 255
-    for y in range(src_h//H):
-        for x in range(src_w//W):
-            f['dat'][idx, :, :, :] = image_data[y*H:(y+1)*H, x*W:(x+1)*W, :]
-            f['lab'][idx, :, :] = image_label[y*H:(y+1)*H, x*W:(x+1)*W]
-            idx += 1
-    f.flush()
-f.close()
+    #画像を読み込む
+    images = np.zeros((h_src, w_src, num_src), dtype=np.uint8)
+    print('reading movie(or images)')
+    for i, name in enumerate(tqdm(image_names)):
+        images[:,:,i] = cv2.imread(name, cv2.IMREAD_GRAYSCALE)
+
+    #画像を当分割できるサイズにクリッピング
+    print('creating dataset')
+    images = images[0:h_sep * H, 0:w_sep * W, 0:f_sep * Nf]
+
+    #x_data作成
+    #拡縮により低解像画像作成
+    buf = cv2.resize(images, ((w_sep * W) // Scl, (h_sep * H) // Scl), interpolation=cv2.INTER_CUBIC)
+    buf = cv2.resize(buf, (w_sep * W, h_sep * H), interpolation=cv2.INTER_CUBIC)
+    #画像をPatchサイズに切り出し
+    buf = buf.reshape(h_sep, H, w_sep, W, f_sep, Nf)
+    #h_sep, H, w_sep, W, f_sep, Nf -> #f_sep, h_sep, w_sep, Nf, H, W の並びに変換
+    buf = buf.transpose((4,0,2,5,1,3))
+    #f_sep, h_sep, w_sep, Nf, H, W -> num_data, Nf, H, W の並びに変換
+    x_data = buf.reshape(num_data, Nf, H, W)
+
+    #y_data作成
+    buf = images.reshape(h_sep, H, w_sep, W, f_sep, Nf)
+    buf = buf.transpose((4,0,2,5,1,3))
+    buf = buf.reshape(num_data, Nf, H, W)
+    y_data = buf[:,Nf // 2 + 1,:,:]
+
+    #hdf5ファイル 書きこみ
+    print('writing hdf5 file')
+    with h5py.File(hdf5_path, 'w') as f:
+        f.create_dataset('x_data', data=x_data, chunks=True)
+        f.create_dataset('y_data', data=y_data, chunks=True)
+        f.flush()
